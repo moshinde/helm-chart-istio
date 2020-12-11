@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.global.secret }}
+type: Opaque
+data:
+{{ (.Files.Glob "config/*").AsSecrets | indent 2 }}
+
+---
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}
+  # namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: {{ .Values.strategy }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      containers:
+      - name: {{ .Chart.Name }}
+        image: {{ .Values.image.name }}:{{ .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - containerPort: {{.Values.service.port}}
+          protocol: TCP
+          name: http
+        env:
+          - name: AWS_REGION
+            value: {{ .Values.global.aws.region }}
+          - name: APP_NAME
+            value: {{ .Values.global.appName | quote }}
+          - name: K8S_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: K8S_CLUSTER
+            value: {{ .Values.global.cluster | quote }}
+          - name: K8S_ENVIRONMENT
+            value: {{ .Values.global.environment | quote }}
+          - name: K8S_SERVICE
+            value: {{ .Values.serviceName | quote }}
+        volumeMounts:
+          - name: secretfiles
+            mountPath: /home/node/server/config/configuration.js
+            subPath: configuration.js
+      volumes:
+        - name: secretfiles
+          secret:
+            secretName: {{ .Values.global.secret }}
+            items:
+            - key: configuration.{{ .Values.global.environment }}.js
+              path: configuration.js
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}
+  # namespace: {{ .Values.global.namespace }}
+spec:
+  ports:
+    - name: http
+      port: {{.Values.service.port}}
+      targetPort: {{.Values.service.port}}
+  selector:
+    app: {{ .Chart.Name }}
+  type: {{.Values.service.type}}
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: {{ .Chart.Name }}-istio-client-mtls
+spec:
+  host: {{ .Chart.Name }}.{{ .Release.Namespace }}.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: name-of-vs
+spec:
+  hosts:
+  - {{ .Values.ingress.host }}
+  - {{ .Chart.Name }}.{{ .Release.Namespace }}.svc.cluster.local
+  gateways:
+  - istio-system/{{ .Values.global.environment }}-{{ .Values.global.appName | lower }}-web-gateway
+  - istio-system/{{ .Values.global.environment }}-{{ .Values.global.appName | lower }}-web-private-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /hello
+    route:
+    - destination:
+        port:
+          number: {{ .Values.service.port }}
+        host: {{ .Chart.Name }}
+      corsPolicy:
+        allowOrigin:
+        - '*'
+        allowMethods:
+        - HEAD
+        - GET
+        - POST
+        - PUT
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Chart.Name }}
+spec:
+  minReplicas: {{ .Values.minReplicas }}
+  maxReplicas: {{ .Values.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: extensions/v1beta1
+    kind: Deployment
+    name: {{ .Chart.Name }}
+  targetCPUUtilizationPercentage: {{ .Values.targetCPUUtilizationPercentage }}

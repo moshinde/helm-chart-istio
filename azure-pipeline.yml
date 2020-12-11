@@ -1,0 +1,237 @@
+trigger:
+  branches:
+    include:
+    - master
+  paths:
+    include:
+    - server/*
+pr:
+  paths:
+    include:
+    - server/*
+
+
+pool:
+  vmImage: 'ubuntu-18.04'
+
+variables:
+- group: service-name
+- name: dockerImageName
+  value: 'service-name'
+- name: chartVersion
+  value: '1.0.2-$(Build.BuildNumber)'
+- name: chartName
+  value: 'service-name'
+- name: buildVersion
+  value: $(Build.BuildNumber)
+- name: vmImageName
+  value: 'ubuntu-18.04'
+- name: rootFolder
+  value: '$(Build.SourcesDirectory)/server'
+- name: releaseVersion
+  value: '1.0.0'
+
+################## BUILD ARTIFACTS #############################################
+
+stages:
+  - stage: Build
+    displayName: Build
+    jobs:
+      - job: Build
+        displayName: Build
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - task: UseNode@1
+            inputs:
+              version: '13.x'
+          
+          - script: |
+              sed -i 's/emailToValue/$(emailTo)/g' $(rootFolder)/execute/execute.js
+              sed -i 's/emailFromValue/$(emailFrom)/g' $(rootFolder)/execute/execute.js
+              sed -i 's/SMTPUserValue/$(SMTPUser)/g' $(rootFolder)/execute/execute.js
+              sed -i 's/SMTPPwdValue/$(SMTPPwd)/g' $(rootFolder)/execute/execute.js
+              sed -i 's/APPVERSION/$(chartVersion)/g' $(rootFolder)/deployment/$(chartName)/Chart.yaml
+              sed -i 's/CHANGE_TAG/$(releaseVersion).$(buildVersion)/g' $(rootFolder)/deployment/$(chartName)/values.yaml
+            displayName: Generate ConnectionString files
+          
+          - task: Npm@1
+            displayName: 'npm install'
+            inputs:
+              workingDir: '$(rootFolder)'
+              verbose: false
+
+          - task: Docker@2
+            condition: succeeded()
+            displayName: 'Build Docker Image'
+            inputs:
+              containerRegistry: 'Azure MyProject Registry'
+              repository: '$(dockerImageName)'
+              command: buildAndPush
+              addPipelineData: false
+              Dockerfile: $(rootFolder)/Dockerfile
+              tags: |
+                $(releaseVersion)
+                $(releaseVersion).$(buildVersion)
+
+          - task: ECRPushImage@1
+            condition: succeeded()
+            displayName: 'Push Image to ECR'
+            inputs:
+              awsCredentials: 'test Validation'
+              regionName: us-east-1
+              sourceImageName: 'MyProject.azurecr.io/$(dockerImageName)'
+              repositoryName: '$(dockerImageName)'
+              imageSource: 'imagename'
+              sourceImageTag: '$(releaseVersion).$(buildVersion)'
+              pushTag: '$(releaseVersion).$(buildVersion)'
+          
+          - task: CopyFiles@2
+            displayName: 'Copy Files to: $(Build.ArtifactStagingDirectory)'
+            inputs:
+              SourceFolder: '$(Build.SourcesDirectory)'
+              Contents: |
+                *.tgz
+                server/deployment/**
+              TargetFolder: '$(Build.ArtifactStagingDirectory)'
+          
+          - task: HelmInstaller@1
+            inputs:
+              helmVersionToInstall: '2.14.1'
+          
+          - task: HelmDeploy@0
+            displayName: Initialize Helm
+            inputs:
+              connectionType: 'None'
+              command: 'init'
+              arguments: '-c'
+          
+          - task: HelmDeploy@0
+            displayName: Package Helm Chart
+            inputs:
+              command: 'package'
+              chartPath: '$(rootFolder)/deployment/$(chartName)'
+              chartVersion: '$(chartVersion)'
+
+          - task: AWSShellScript@1
+            displayName: Publish Helm Chart to S3
+            inputs:
+              awsCredentials: 'test Validation'
+              regionName: 'us-east-1'
+              scriptType: 'inline'
+              inlineScript: |
+                helm plugin install https://github.com/hypnoglow/helm-s3.git
+                helm repo add test-helm-chart s3://test-helm-chart/service-name-charts
+                helm s3 push --force $(Build.ArtifactStagingDirectory)/$(chartName)-$(chartVersion).tgz test-helm-chart
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Pipeline Artifact'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)'
+              artifact: serviceName
+
+  - stage: DeployQA
+#    condition: and(succeeded(), ne(variables['Build.SourceBranch'], 'refs/heads/master'))
+    dependsOn: Build
+    displayName: Deployment to QA
+    pool: k8s-hhh-dev
+    jobs:
+      - deployment: DeployQA
+        displayName: QA Deployment
+        environment: 'service-name-qa'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: HelmInstaller@1
+                  inputs:
+                    helmVersionToInstall: '2.14.1'
+                    checkLatestHelmVersion: false
+                
+                - task: HelmDeploy@0
+                  displayName: 'Helm purge'
+                  inputs:
+                    connectionType: 'None'
+                    command: delete
+                    arguments: ' --purge hhhofflineserverqa'
+                
+                - task: HelmDeploy@0
+                  displayName: 'Helm Upgrade'
+                  inputs:
+                    connectionType: 'None'
+                    namespace: 'qa-hhh'
+                    command: upgrade
+                    chartType: 'FilePath'
+                    chartPath: '$(Pipeline.Workspace)/HHHOfflineServer/$(chartName)-$(chartVersion).tgz'
+                    releaseName: 'hhhofflineserverqa'
+                    valueFile: '$(Pipeline.Workspace)/HHHOfflineServer/server/deployment/value-overrides/values-qa.yaml'
+
+  - stage: DeployStage
+#    condition: and(succeeded(), ne(variables['Build.SourceBranch'], 'refs/heads/master'))
+    dependsOn: DeployQA
+    condition: and(succeeded(), eq(variables['build.sourceBranch'], 'refs/heads/master'))
+    displayName: Deployment to Stage
+    pool: k8s-hhh-stage
+    jobs:
+      - deployment: DeployStage
+        displayName: Stage Deployment
+        environment: 'service-name-stage'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: HelmInstaller@1
+                  inputs:
+                    helmVersionToInstall: '2.14.1'
+                    checkLatestHelmVersion: false
+                
+                - task: HelmDeploy@0
+                  displayName: 'Helm purge'
+                  inputs:
+                    connectionType: 'None'
+                    command: delete
+                    arguments: ' --purge hhhofflineserverstage'
+
+                - task: HelmDeploy@0
+                  displayName: 'Helm Upgrade'
+                  inputs:
+                    connectionType: 'None'
+                    namespace: 'stage-hhh'
+                    command: upgrade
+                    chartType: 'FilePath'
+                    chartPath: '$(Pipeline.Workspace)/HHHOfflineServer/$(chartName)-$(chartVersion).tgz'
+                    releaseName: 'hhhofflineserverstage'
+                    valueFile: '$(Pipeline.Workspace)/HHHOfflineServer/server/deployment/value-overrides/values-stage.yaml'
+
+#  - stage: DeployProd
+#    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+#    dependsOn: DeployStage
+#    pool: k8s-hhh-prod
+#    jobs:
+#    - deployment: DeployProd
+#      environment: 'service-name-prod'
+#      strategy:
+#        runOnce:
+#          deploy:
+#            steps:
+#            - task: HelmInstaller@1
+#              inputs:
+#                helmVersionToInstall: '2.14.1'
+
+#            - task: HelmDeploy@0
+#              displayName: 'helm delete'
+#              inputs:
+#                connectionType: None
+#                command: delete
+#                arguments: ' --purge hhhofflineserverprod'
+
+#            - task: HelmDeploy@0
+#              displayName: 'helm upgrade'
+#              inputs:
+#                connectionType: 'None'
+#                namespace: 'prod-hhh'
+#                command: 'upgrade'
+#                chartType: 'FilePath'
+#                chartPath: '$(Pipeline.Workspace)/HHHOfflineServer/$(chartName)-$(chartVersion).tgz'
+#                releaseName: 'hhhofflineserverprod'
+#                valueFile: '$(Pipeline.Workspace)/HHHOfflineServer/server/deployment/value-overrides/values-prod.yaml'

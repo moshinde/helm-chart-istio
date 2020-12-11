@@ -1,0 +1,12 @@
+apiVersion: v1
+name: <template-microservice>
+appVersion: APPVERSION
+description: <Helm template for microservice>
+keywords:
+  - helm-template
+home: <github link for repo>
+sources:
+  - <github link for repo>
+maintainers:
+  - name: Monica Shinde
+    email: <email-id>

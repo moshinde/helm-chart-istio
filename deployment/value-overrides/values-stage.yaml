@@ -1,0 +1,13 @@
+global:
+  cluster: <cluster-name>
+  environment: stage
+  aws:
+    region: us-east-1
+  secret: <se-name>
+
+minReplicas: 2
+maxReplicas: 3
+replicaCount: 2
+
+ingress:
+  host: <domainName>

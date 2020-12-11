@@ -1,0 +1,26 @@
+global:
+  cluster: <cluster-name>
+  appName: <appname>
+  environment: dev
+  aws:
+    region: us-east-1
+
+serviceName: <serviceName>
+serviceAccountName: <sa-act-name>
+strategy: RollingUpdate
+minReplicas: 2
+maxReplicas: 3
+replicaCount: 2
+targetCPUUtilizationPercentage: 60
+
+ingress:
+  host: <hostname-domain-name>
+
+image:
+  name: <dockerhub/image-name>
+  tag: CHANGE_TAG
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80
